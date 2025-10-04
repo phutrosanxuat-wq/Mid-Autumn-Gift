@@ -1,0 +1,1066 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vòng Quay Số May Mắn Trung Thu</title>
+    <!-- Tải Tailwind CSS và Font Montserrat -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700;900&display=swap" rel="stylesheet">
+    
+    <!-- Tải Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, collection, query, where, getDocs, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Khởi tạo Firebase
+        // Đảm bảo các biến __firebase_config và __app_id được xử lý an toàn
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        setLogLevel('debug'); // Bật log debug cho Firestore
+        
+        // Biến toàn cục
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'trung-thu-spin-game';
+        let currentUserId = null;
+        
+        const MAX_NUMBER = 200; 
+        
+        // Mật khẩu Admin
+        const ADMIN_SECRET = "midautumn2024"; 
+        let isAdmin = false;
+        
+        // Dữ liệu quay số được lưu tạm thời sau khi đăng ký thành công
+        let assignedSpinData = {
+            finalNumber: null,
+            playerName: null
+        };
+
+        // --- Hàm Tiện Ích ---
+
+        // Tạo UUID ngẫu nhiên
+        function generateUUID() {
+            return crypto.randomUUID();
+        }
+
+        // Hiển thị thông báo (thay thế alert)
+        function showMessage(title, message, isError = false) {
+            const modal = document.getElementById('messageModal');
+            document.getElementById('modalTitle').textContent = title;
+            document.getElementById('modalMessage').innerHTML = message;
+            
+            // Đổi tên nút đóng
+            document.getElementById('closeModalBtn').textContent = 'Quay lại';
+            
+            const modalContent = document.getElementById('modalContent');
+            
+            // Đặt màu tiêu đề theo loại thông báo
+            const titleElement = document.getElementById('modalTitle');
+            titleElement.classList.remove('text-red-600', 'text-green-600');
+            if (isError) {
+                titleElement.classList.add('text-red-600');
+            } else {
+                titleElement.classList.add('text-red-600');
+            }
+            
+            // Ngăn chặn cuộn body khi modal mở
+            document.body.style.overflow = 'hidden'; 
+            
+            // Đảm bảo modal hiện lên với animation
+            modalContent.classList.remove('scale-0', 'opacity-0'); 
+            modalContent.classList.add('modal-content-animated', 'animate-pop-in'); 
+            
+            modal.classList.remove('hidden');
+        }
+        
+        function hideMessage() {
+            const modalContent = document.getElementById('modalContent');
+            
+            // Cho phép cuộn lại body
+            document.body.style.overflow = 'auto'; 
+            
+            // Bắt đầu animation ẩn
+            modalContent.classList.remove('animate-pop-in');
+            modalContent.classList.add('scale-0', 'opacity-0');
+            
+            setTimeout(() => {
+                document.getElementById('messageModal').classList.add('hidden');
+                modalContent.classList.remove('modal-content-animated'); // Dọn dẹp class animation
+            }, 300); 
+            
+            // Đảm bảo nút đăng ký được kích hoạt lại nếu đang ở trang đăng ký
+             if (!document.getElementById('registrationPage').classList.contains('hidden')) {
+                const spinBtn = document.getElementById('spinBtn');
+                spinBtn.disabled = false;
+                spinBtn.textContent = 'Đăng Ký & Quay Số!';
+             }
+        }
+
+        // --- Logic Firebase và Auth ---
+        
+        async function authenticateUser() {
+            const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                currentUserId = auth.currentUser?.uid || generateUUID();
+                document.getElementById('userIdDisplay').textContent = `ID Thiết Bị: ${currentUserId.substring(0, 8)}...`;
+                console.log("Xác thực Firebase thành công. User ID:", currentUserId);
+                
+                showPage('registrationPage');
+            } catch (error) {
+                console.error("Lỗi xác thực Firebase:", error);
+                showMessage("Lỗi Hệ Thống", "Không thể kết nối dịch vụ. Vui lòng thử lại.", true);
+            }
+        }
+        
+        // --- Đường dẫn Firestore ---
+
+        function getPlayerCollectionPath() {
+            // Public collection
+            return `artifacts/${appId}/public/data/players`;
+        }
+
+        function getNumberStateDocPath() {
+            // Public document for game state
+            return `artifacts/${appId}/public/data/number_states/master_state`;
+        }
+        
+        // --- Logic Admin Lịch Sử (Real-time) ---
+        
+        function loadAdminHistory() {
+            if (!isAdmin) return;
+            
+            const playersRef = collection(db, getPlayerCollectionPath());
+            const historyList = document.getElementById('adminSpinHistoryList');
+            
+            // Lắng nghe thay đổi theo thời gian thực (onSnapshot)
+            const unsubscribe = onSnapshot(playersRef, (snapshot) => {
+                let historyHTML = '';
+                const historyData = [];
+
+                snapshot.forEach(doc => {
+                    // Lấy dữ liệu và thêm timestamp để sắp xếp
+                    const data = doc.data();
+                    historyData.push(data);
+                });
+
+                // Sắp xếp theo timestamp giảm dần (mới nhất lên đầu)
+                historyData.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+                
+                if (historyData.length === 0) {
+                    historyHTML = '<tr><td colspan="4" class="p-3 text-center text-gray-500">Chưa có người chơi nào tham gia.</td></tr>';
+                } else {
+                    historyData.forEach((player, index) => {
+                        const time = new Date(player.timestamp).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                        const date = new Date(player.timestamp).toLocaleDateString('vi-VN');
+                        
+                        // Màu chữ khác nhau cho số chẵn/lẻ
+                        const numberClass = player.luckyNumber % 2 === 0 ? 'text-red-600' : 'text-yellow-600';
+
+                        historyHTML += `
+                            <tr class="${index % 2 === 0 ? 'bg-gray-50' : 'bg-white'} border-b border-gray-200">
+                                <td class="p-3 text-left font-semibold text-sm">${player.facebookName || 'Không Tên'}</td>
+                                <td class="p-3 text-left font-mono text-xs text-gray-600">${player.phoneNumber || 'Không SĐT'}</td>
+                                <td class="p-3 text-center font-bold text-lg ${numberClass}">${player.luckyNumber}</td>
+                                <td class="p-3 text-right text-sm text-gray-500">${time} (${date})</td>
+                            </tr>
+                        `;
+                    });
+                }
+                historyList.innerHTML = historyHTML;
+            }, (error) => {
+                console.error("Lỗi khi tải lịch sử quay số Admin:", error);
+            });
+            return unsubscribe;
+        }
+
+        // --- Logic Quay Số Chính ---
+
+        async function spinNumber() {
+            const spinBtn = document.getElementById('spinBtn');
+            const facebookName = document.getElementById('facebookName').value.trim(); 
+            const phoneNumber = document.getElementById('phoneNumber').value.trim(); 
+            
+            if (!facebookName || !phoneNumber) {
+                showMessage("Lỗi Nhập Liệu", "Vui lòng nhập **Tên Facebook** và **Số điện thoại** để tham gia.", true);
+                return;
+            }
+            
+            spinBtn.disabled = true;
+            spinBtn.textContent = 'Đang Kiểm Tra & Lấy Số...';
+
+            try {
+                const playersRef = collection(db, getPlayerCollectionPath());
+                
+                // 1. Kiểm tra người chơi đã quay chưa bằng SỐ ĐIỆN THOẠI
+                // Sử dụng query.where để đảm bảo mỗi SĐT chỉ quay 1 lần
+                const q = query(playersRef, where("phoneNumber", "==", phoneNumber));
+                const existingSpinSnapshot = await getDocs(q);
+
+                if (!existingSpinSnapshot.empty) {
+                    const existingData = existingSpinSnapshot.docs[0].data();
+                    showMessage("Bạn Đã Quay Rồi!", 
+                                `Số điện thoại **${phoneNumber}** đã nhận được **Số May Mắn ${existingData.luckyNumber}** trước đó. Mỗi SĐT chỉ được quay 1 lần.`, 
+                                true);
+                    return; 
+                }
+                
+                // 2. Lấy số may mắn duy nhất
+                const masterStateDocRef = doc(db, getNumberStateDocPath());
+                const stateSnapshot = await getDoc(masterStateDocRef);
+                
+                let availableNumbers = [];
+                let allocatedNumbers = {};
+
+                if (stateSnapshot.exists()) {
+                    allocatedNumbers = stateSnapshot.data().allocatedNumbers || {};
+                }
+                
+                for (let i = 1; i <= MAX_NUMBER; i++) {
+                    if (!allocatedNumbers[i]) {
+                        availableNumbers.push(i);
+                    }
+                }
+                
+                if (availableNumbers.length === 0) {
+                    showMessage("Hết Số", "Rất tiếc, tất cả các số may mắn (1-200) đã được quay hết!");
+                    return; 
+                }
+
+                const randomIndex = Math.floor(Math.random() * availableNumbers.length);
+                const assignedNumber = availableNumbers[randomIndex];
+                
+                // 3. Cập nhật trạng thái số đã quay (CHUẨN BỊ LƯU)
+                allocatedNumbers[assignedNumber] = {
+                    phoneNumber: phoneNumber, 
+                    timestamp: new Date().toISOString()
+                };
+                
+                await setDoc(masterStateDocRef, { allocatedNumbers }, { merge: true });
+
+                // 4. Lưu thông tin người chơi và số quay 
+                const playerDocData = {
+                    userId: currentUserId,
+                    facebookName: facebookName, 
+                    phoneNumber: phoneNumber,   
+                    luckyNumber: assignedNumber,
+                    timestamp: new Date().toISOString()
+                };
+                
+                // Dùng userId làm document ID để dễ dàng theo dõi
+                const playerDocRef = doc(playersRef, currentUserId); 
+                await setDoc(playerDocRef, playerDocData);
+
+                // 5. Lưu số đã quay vào biến tạm và chuyển sang trang quay
+                assignedSpinData.finalNumber = assignedNumber;
+                assignedSpinData.playerName = facebookName;
+                
+                document.getElementById('spinBtn').textContent = 'Đăng Ký Thành Công!';
+
+                showPage('spinPage');
+                
+            } catch (error) {
+                console.error("Lỗi trong quá trình quay số:", error);
+                showMessage("Lỗi Hệ Thống", "Đã xảy ra lỗi khi quay số. Vui lòng kiểm tra lại kết nối.", true);
+                spinBtn.disabled = false;
+                spinBtn.textContent = 'Đăng Ký & Quay Số!';
+            }
+        }
+        
+        // Chức năng mới: Bắt đầu Animation Quay số (Khi người dùng nhấn nút)
+        function startSpinAnimation() {
+            const finalNumber = assignedSpinData.finalNumber;
+            const playerName = assignedSpinData.playerName;
+            
+            if (finalNumber === null) {
+                showMessage("Lỗi Dữ Liệu", "Không tìm thấy số may mắn đã cấp. Vui lòng quay lại trang đăng ký.", true);
+                showPage('registrationPage');
+                return;
+            }
+            
+            const actualSpinBtn = document.getElementById('actualSpinBtn');
+            actualSpinBtn.disabled = true;
+            actualSpinBtn.textContent = 'ĐANG QUAY...';
+            actualSpinBtn.classList.remove('animate-pulse'); // Tắt nhấp nháy
+
+            const wheel = document.getElementById('wheel');
+            const resultDisplay = document.getElementById('resultDisplay');
+            
+            resultDisplay.textContent = 'Đang Quay Số...';
+            document.getElementById('resultContainer').classList.remove('hidden');
+            wheel.classList.remove('animate-pulse-spin'); // Tắt nhấp nháy vòng quay
+
+            // LOGIC QUAY SỐ (Animation chỉ là hình thức)
+            const degreesPerNumber = 360 / MAX_NUMBER; 
+            const targetOffset = degreesPerNumber * 0.5; // Centers the pointer
+            const numberAngle = (finalNumber * degreesPerNumber) + targetOffset;
+            const rotationNeeded = 180 - numberAngle;
+            // Quay 5 vòng đầy đủ + về đúng vị trí + 360 độ (để đảm bảo quay đủ)
+            const totalRotation = 5 * 360 + rotationNeeded + 360; 
+            
+            // 1. Reset rotation (để đảm bảo animation bắt đầu từ đầu)
+            wheel.style.transition = 'none';
+            wheel.style.transform = `rotate(0deg)`;
+
+            // 2. Buộc trình duyệt vẽ lại (reflow)
+            wheel.offsetHeight; 
+
+            // 3. Áp dụng animation quay 6 giây
+            wheel.style.transition = 'transform 6s cubic-bezier(0.25, 0.1, 0.25, 1)'; 
+            wheel.style.transform = `rotate(${totalRotation}deg)`;
+
+
+            // Hiển thị kết quả sau khi animation kết thúc
+            setTimeout(() => {
+                const resultText = `Kết quả: ${finalNumber}`;
+                resultDisplay.textContent = resultText;
+                
+                // Điều chỉnh vị trí cuối cùng
+                const finalAngle = totalRotation % 360;
+                wheel.style.transition = 'none'; 
+                wheel.style.transform = `rotate(${finalAngle}deg)`;
+                
+                // --- KẾT QUẢ QUAY SỐ MODAL (Đã điều chỉnh kích thước text) ---
+                const messageContent = `
+                    <div class="bg-white p-6 rounded-2xl border-4 border-red-600 shadow-xl mb-6">
+                        <p class="text-xl md:text-3xl font-extrabold text-red-700 text-center mb-2 leading-snug text-readable-outline">
+                            Xin Chúc Mừng, ${playerName}! 
+                        </p>
+                        <p class="text-lg md:text-xl text-gray-700 font-semibold text-center mt-3 text-readable-outline" style="text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff;">
+                            Số May Mắn Của Bạn Là: 
+                        </p>
+                        <div class="mt-4">
+                            <span class="block text-5xl md:text-6xl font-black text-red-900" style="text-shadow: 
+                                -3px -3px 0 #fcd34d, 3px -3px 0 #fcd34d, 
+                                -3px 3px 0 #fcd34d, 3px 3px 0 #fcd34d,
+                                0 0 15px #ff0, 0 0 20px #ffc107;">
+                                ${finalNumber}
+                            </span>
+                        </div>
+                    </div>
+                    <p class="mb-4 text-center text-gray-700 text-sm">Vui lòng chụp màn hình hoặc ghi nhớ SĐT để đối chiếu.</p>
+                `;
+                
+                showMessage("🥳 KẾT QUẢ MAY MẮN! 🥳", messageContent);
+                
+                // Sau khi quay xong, reset data tạm thời và ẩn nút quay
+                assignedSpinData.finalNumber = null;
+                assignedSpinData.playerName = null;
+                // Không ẩn nút quay mà để ở trạng thái disabled và đổi text
+                actualSpinBtn.textContent = 'ĐÃ QUAY XONG';
+                actualSpinBtn.classList.remove('animate-pulse');
+
+            }, 6000); 
+        }
+        
+        // --- Logic Admin (Giữ nguyên) ---
+
+        let historyUnsubscribe = null;
+
+        function checkAdminLogin() {
+            const password = document.getElementById('adminPassword').value;
+            if (password === ADMIN_SECRET) {
+                isAdmin = true;
+                document.getElementById('adminLoginError').textContent = '';
+                showPage('adminDashboard');
+                historyUnsubscribe = loadAdminHistory(); 
+                updateAdminDashboard();
+            } else {
+                document.getElementById('adminLoginError').textContent = 'Mật khẩu không đúng.';
+                document.getElementById('adminPassword').value = '';
+            }
+        }
+
+        async function updateAdminDashboard() {
+            const masterStateDocRef = doc(db, getNumberStateDocPath());
+            const stateSnapshot = await getDoc(masterStateDocRef);
+            
+            let allocatedCount = 0;
+            if (stateSnapshot.exists()) {
+                const allocatedNumbers = stateSnapshot.data().allocatedNumbers || {};
+                allocatedCount = Object.keys(allocatedNumbers).length;
+            }
+
+            document.getElementById('numbersAllocated').textContent = allocatedCount;
+            document.getElementById('numbersRemaining').textContent = MAX_NUMBER - allocatedCount;
+            document.getElementById('totalNumbers').textContent = MAX_NUMBER;
+        }
+
+        async function resetGameData() {
+            const modalTitle = "Xác Nhận Thiết Lập Lại";
+            const modalMessage = `
+                <p class="text-lg font-bold text-red-600 mb-3 text-readable-outline">Bạn có chắc chắn muốn XÓA TẤT CẢ dữ liệu không?</p>
+                <p class="text-sm">Hành động này sẽ xóa toàn bộ số đã được cấp phát và lịch sử người chơi. Không thể hoàn tác.</p>
+                <div class="flex justify-around mt-4">
+                    <button id="confirmResetBtn" class="py-2 px-4 rounded-lg bg-red-600 text-white font-bold hover:bg-red-700 transition duration-150">Xác Nhận Xóa</button>
+                    <button id="cancelResetBtn" class="py-2 px-4 rounded-lg bg-gray-300 text-gray-800 font-bold hover:bg-gray-400">Hủy Bỏ</button>
+                </div>
+            `;
+
+            showMessage(modalTitle, modalMessage, true);
+            
+            // Logic xử lý nút trong modal
+            document.getElementById('confirmResetBtn').onclick = async () => {
+                hideMessage();
+                try {
+                    const masterStateDocRef = doc(db, getNumberStateDocPath());
+                    await setDoc(masterStateDocRef, { allocatedNumbers: {} }); 
+
+                    const playersRef = collection(db, getPlayerCollectionPath());
+                    const querySnapshot = await getDocs(playersRef);
+                    
+                    querySnapshot.forEach(async (d) => {
+                        await deleteDoc(doc(playersRef, d.id));
+                    });
+
+                    showMessage("Thành công", "Đã thiết lập lại toàn bộ dữ liệu trò chơi.");
+                    updateAdminDashboard();
+                    
+                } catch (error) {
+                    console.error("Lỗi khi reset game:", error);
+                    showMessage("Lỗi", "Không thể thiết lập lại trò chơi. Vui lòng kiểm tra console log.", true);
+                }
+            };
+            document.getElementById('cancelResetBtn').onclick = hideMessage;
+            
+            // Đặt lại sự kiện đóng mặc định
+            document.getElementById('closeModalBtn').onclick = hideMessage;
+        }
+
+
+        function logoutAdmin() {
+            isAdmin = false;
+            document.getElementById('adminPassword').value = '';
+            if (historyUnsubscribe) {
+                historyUnsubscribe(); 
+                historyUnsubscribe = null;
+            }
+            showPage('registrationPage');
+        }
+        
+        // --- Quản lý Giao diện ---
+        
+        function showPage(pageId) {
+            document.querySelectorAll('.page').forEach(page => {
+                page.classList.add('hidden');
+            });
+            document.getElementById(pageId).classList.remove('hidden');
+
+            const resultContainer = document.getElementById('resultContainer');
+            const wheel = document.getElementById('wheel');
+            const actualSpinBtn = document.getElementById('actualSpinBtn');
+            
+            if (pageId === 'spinPage') {
+                // Trang chờ quay: Hiện nút QUAY, ẩn khung kết quả
+                wheel.classList.add('animate-pulse-spin');
+                resultContainer.classList.add('hidden');
+                
+                // Hiện nút quay và đặt lại trạng thái chờ ấn
+                actualSpinBtn.classList.remove('hidden');
+                actualSpinBtn.disabled = false;
+                actualSpinBtn.textContent = 'QUAY VÒNG MAY MẮN!';
+                actualSpinBtn.classList.add('animate-pulse'); // Mời người dùng ấn
+            } else if (pageId === 'registrationPage') {
+                 // Reset vị trí vòng quay về 0, thêm nhấp nháy, ẩn khung kết quả và nút quay
+                 wheel.style.transition = 'none';
+                 wheel.style.transform = `rotate(0deg)`;
+                 wheel.classList.add('animate-pulse-spin');
+                 resultContainer.classList.add('hidden'); 
+                 actualSpinBtn.classList.add('hidden');
+                 
+                 // Đảm bảo nút đăng ký luôn sẵn sàng
+                 document.getElementById('spinBtn').disabled = false;
+                 document.getElementById('spinBtn').textContent = 'Đăng Ký & Quay Số!';
+                 
+                 // Xóa dữ liệu tạm (nếu có)
+                 assignedSpinData.finalNumber = null;
+                 assignedSpinData.playerName = null;
+            } else {
+                 // Các trang khác (Admin)
+                 wheel.classList.remove('animate-pulse-spin');
+                 resultContainer.classList.add('hidden');
+            }
+        }
+        
+        // --- Logic Hiển thị Số trên Vòng Quay ---
+
+        function renderWheelNumbers() {
+            const wheel = document.getElementById('wheel');
+            const degreesPerNumber = 360 / MAX_NUMBER; // 1.8 độ / số
+
+            // Điều chỉnh kích thước vòng quay theo kích thước màn hình
+            let currentWheelRadius = 200; 
+            if (window.innerWidth <= 600) {
+                 currentWheelRadius = 150; 
+            }
+
+            wheel.innerHTML = ''; // Xóa các số cũ
+
+            // Chỉ hiển thị các mốc số (10, 20, 30, ... 200)
+            for (let i = 1; i <= MAX_NUMBER; i++) {
+                if (i % 10 === 0) { 
+                    const numberDiv = document.createElement('div');
+                    numberDiv.textContent = i;
+                    // Class để làm nổi bật mốc
+                    numberDiv.classList.add('number-text-marker', 'font-black', 'text-xl', 'text-white', 'text-readable-outline'); 
+
+                    const rotation = i * degreesPerNumber; // Góc quay của số
+                    
+                    numberDiv.style.setProperty('--rotation', `${rotation}deg`);
+
+                    // Tính toán vị trí và xoay
+                    numberDiv.style.cssText += `
+                        position: absolute;
+                        width: 30px;
+                        height: 20px;
+                        top: 50%;
+                        left: 50%;
+                        transform: 
+                            rotate(${rotation}deg) 
+                            translate(${currentWheelRadius * 0.75}px) 
+                            rotate(-90deg); 
+                        transform-origin: 0 0;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        user-select: none;
+                        z-index: 15;
+                    `;
+                    wheel.appendChild(numberDiv);
+                }
+            }
+            wheel.classList.add('animate-pulse-spin');
+        }
+
+        
+        // Khởi tạo và liên kết sự kiện
+        window.onload = function() {
+            // Vẽ các con số (mốc) lên vòng quay
+            renderWheelNumbers();
+
+            // Xử lý khi resize để đảm bảo số trên vòng quay đúng vị trí 
+            window.addEventListener('resize', () => {
+                const newRadius = window.innerWidth <= 600 ? 150 : 200;
+                // Kiểm tra kích thước hiện tại của bánh xe để tránh tính toán lại không cần thiết
+                const currentWheelWidth = document.getElementById('wheel').clientWidth;
+                const expectedWidth = newRadius * 2;
+                if (currentWheelWidth !== expectedWidth) {
+                    renderWheelNumbers();
+                }
+            });
+
+            // Khởi tạo xác thực
+            authenticateUser();
+            
+            // Liên kết sự kiện
+            document.getElementById('spinBtn').addEventListener('click', spinNumber);
+            document.getElementById('actualSpinBtn').addEventListener('click', startSpinAnimation); // Nút quay mới
+           
+            document.getElementById('closeModalBtn').addEventListener('click', hideMessage);
+            document.getElementById('backToRegBtn').addEventListener('click', () => showPage('registrationPage'));
+            
+            // Logic Admin ẩn
+            document.getElementById('hiddenAdminLink').addEventListener('click', (e) => {
+                 e.preventDefault();
+                 showPage('adminLoginPage');
+            });
+            document.getElementById('adminLoginBtn').addEventListener('click', checkAdminLogin);
+            document.getElementById('adminLogoutBtn').addEventListener('click', logoutAdmin);
+            document.getElementById('resetGameBtn').addEventListener('click', resetGameData);
+            document.getElementById('backFromAdminBtn').addEventListener('click', logoutAdmin); 
+            
+            document.getElementById('adminPassword').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    checkAdminLogin();
+                }
+            });
+        };
+
+    </script>
+
+    <style>
+        /* CSS Cố định */
+        body {
+            font-family: 'Montserrat', sans-serif;
+            color: #4a5568;
+            min-height: 100vh;
+            /* Đổi nền để làm nổi bật ánh trăng và lồng đèn */
+            background: radial-gradient(circle at 50% 100%, #171c35 0%, #0c0a09 100%);
+            /* CSS sẽ được điều chỉnh bằng JS để quản lý cuộn */
+            overflow: auto; 
+        }
+
+        /* --- STYLES BỔ SUNG THEO YÊU CẦU --- */
+
+        /* Hiệu ứng viền chữ mỏng (outline) để đảm bảo dễ đọc */
+        .text-readable-outline {
+            text-shadow:
+                -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;
+        }
+
+        /* Tạo hình ảnh mặt trăng tròn với ánh sáng vàng dịu */
+        .full-moon {
+            position: absolute;
+            top: 50px;
+            right: 50px;
+            width: 150px;
+            height: 150px;
+            background-color: #ffe08a; /* Màu vàng nhạt của trăng */
+            border-radius: 50%;
+            /* Hiệu ứng ánh trăng sáng (box-shadow) */
+            box-shadow: 
+                0 0 30px 10px #fff7b0, /* Ánh sáng gần */
+                0 0 80px 30px #ffe780; /* Ánh sáng lan tỏa */
+            z-index: 5;
+        }
+        
+        /* Thiết kế đèn lồng */
+        .lantern {
+            position: absolute;
+            width: 40px;
+            height: 60px;
+            background-color: #ff4500; /* Màu đỏ rực */
+            border-radius: 50% / 60% 60% 10% 10%;
+            border: 2px solid #ffd700; /* Viền vàng */
+            /* Hiệu ứng ánh sáng đèn lồng */
+            box-shadow: 0 0 15px 5px rgba(255, 140, 0, 0.9), inset 0 0 5px rgba(255, 255, 0, 0.5);
+            z-index: 10;
+            animation: swing 4s ease-in-out infinite alternate; /* Hiệu ứng đung đưa */
+        }
+
+        .lantern::after {
+            content: '';
+            position: absolute;
+            bottom: -15px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 10px;
+            height: 15px;
+            background-color: #ff8c00; /* Tua rua vàng cam */
+            clip-path: polygon(0 0, 100% 0, 50% 100%);
+        }
+        
+        /* Hiệu ứng đung đưa cho đèn lồng */
+        @keyframes swing {
+            0% { transform: rotate(-3deg); }
+            100% { transform: rotate(3deg); }
+        }
+
+        /* --- STYLES CHỦ ĐỀ CHUNG --- */
+        
+        .mid-autumn-card {
+            background-color: #ffffff;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+            border: 4px solid #f97316;
+        }
+        
+        .mid-autumn-btn {
+            background-color: #ef4444;
+            color: #ffffff;
+            transition: background-color 0.3s, transform 0.2s;
+            box-shadow: 0 4px 0 #b91c1c;
+        }
+        .mid-autumn-btn:hover {
+            background-color: #dc2626;
+            transform: scale(1.02);
+            box-shadow: 0 2px 0 #991b1b;
+        }
+        .mid-autumn-btn:active {
+             transform: scale(0.98) translateY(2px);
+             box-shadow: none;
+        }
+        .mid-autumn-btn:disabled {
+            background-color: #f6ad55;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        
+        .lion-banner-title {
+            color: #fde047; /* Giữ màu vàng rực rỡ */
+            text-shadow: 
+                -3px -3px 0 #b91c1c, /* Viền đỏ mạnh */
+                3px -3px 0 #b91c1c, 
+                -3px 3px 0 #b91c1c, 
+                3px 3px 0 #b91c1c,
+                0 0 20px rgba(253, 224, 71, 1); /* Tăng độ sáng */
+        }
+
+        /* --- CSS Vòng Quay NỬA HÌNH TRÒN TRÊN (Responsive) --- */
+        
+        #wheel-container {
+            width: 400px;
+            height: 400px; 
+            margin: 0 auto;
+            position: relative;
+        }
+        
+        #wheel-wrapper {
+            width: 400px;
+            height: 200px; 
+            overflow: hidden; 
+            position: absolute;
+            top: 0; 
+            left: 0;
+            border: 5px solid #fcd34d;
+            border-bottom: none;
+            border-radius: 200px 200px 0 0; 
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.4);
+            z-index: 10;
+            background-color: #fff;
+        }
+        
+        #wheel {
+            width: 400px;
+            height: 400px;
+            border-radius: 50%;
+            transition: none; 
+            background: conic-gradient(
+                #f97316 0% 5%, #fed7aa 5% 10%, #fbbf24 10% 15%, #ef4444 15% 20%,
+                #f97316 20% 25%, #fed7aa 25% 30%, #fbbf24 30% 35%, #ef4444 35% 40%,
+                #f97316 40% 45%, #fed7aa 45% 50%, #fbbf24 50% 55%, #ef4444 55% 60%,
+                #f97316 60% 65%, #fed7aa 65% 70%, #fbbf24 70% 75%, #ef4444 75% 80%,
+                #f97316 80% 85%, #fed7aa 85% 90%, #fbbf24 90% 95%, #ef4444 95% 100%
+            );
+            border: 10px solid #fcd34d;
+            position: absolute;
+            top: 0; 
+            left: 0;
+            transform: rotate(0deg);
+        }
+
+        /* Responsive adjustments for mobile */
+        @media (max-width: 600px) {
+            #wheel-container {
+                width: 300px;
+                height: 300px;
+            }
+            #wheel-wrapper {
+                width: 300px;
+                height: 150px;
+                border-radius: 150px 150px 0 0;
+            }
+            #wheel {
+                width: 300px;
+                height: 300px;
+                top: 0; 
+            }
+            .lantern-pointer {
+                bottom: -20px;
+                width: 40px;
+                height: 40px;
+            }
+            /* Giá trị 112px = 150px (radius) * 0.75 */
+            .number-text-marker {
+                transform: rotate(var(--rotation)) translate(112px) rotate(-90deg) !important;
+            }
+            .full-moon {
+                width: 80px;
+                height: 80px;
+                top: 20px;
+                right: 20px;
+            }
+            .lion-banner-title {
+                font-size: 2.5rem; /* Tương đương text-4xl */
+            }
+        }
+        /* End Responsive Wheel */
+
+        .number-text-marker {
+             --rotation: 0deg;
+        }
+        
+        /* Hiệu ứng nhấp nháy cho vòng quay khi chờ đăng ký */
+        @keyframes wheel-pulse {
+            0% { box-shadow: 0 0 15px rgba(239, 68, 68, 0.5); }
+            50% { box-shadow: 0 0 25px rgba(252, 211, 77, 0.8); }
+            100% { box-shadow: 0 0 15px rgba(239, 68, 68, 0.5); }
+        }
+        .animate-pulse-spin {
+            animation: wheel-pulse 2s infinite alternate ease-in-out;
+        }
+        
+        /* Hiệu ứng nhấp nháy cho nút QUAY mới (mời người dùng ấn) */
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+            50% {
+                opacity: 0.8;
+                transform: scale(1.03);
+            }
+        }
+        .animate-pulse {
+            animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+
+        .lantern-pointer {
+            position: absolute;
+            bottom: -25px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 50px;
+            height: 50px;
+            z-index: 20; 
+            color: #ef4444; 
+            filter: drop-shadow(0 0 8px #fde047);
+        }
+        
+        .lantern-pointer svg {
+             transform: rotate(180deg);
+        }
+        
+        @keyframes glow {
+            0%, 100% { filter: drop-shadow(0 0 8px #fde047); }
+            50% { filter: drop-shadow(0 0 15px #ef4444); }
+        }
+        .animate-lantern-glow {
+            animation: glow 3s ease-in-out infinite alternate;
+        }
+
+        /* CSS Modal Animation */
+        .modal-container {
+            transition: opacity 0.3s ease;
+            backdrop-filter: blur(5px); /* Làm mờ nền cho rõ ràng hơn */
+        }
+        @keyframes modal-pop-in {
+            0% { transform: scale(0.5) translateY(100px); opacity: 0; }
+            60% { transform: scale(1.1) translateY(0); opacity: 1; }
+            100% { transform: scale(1); }
+        }
+        .animate-pop-in {
+            animation: modal-pop-in 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55) forwards;
+        }
+        .modal-content-animated { 
+            transition: none !important;
+        }
+        
+        /* Decoration CSS */
+        .decoration-svg {
+            position: absolute;
+            z-index: 0;
+            filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.3));
+        }
+
+        @keyframes float {
+            0% { transform: translateY(0px) rotate(0deg); }
+            50% { transform: translateY(-10px) rotate(2deg); }
+            100% { transform: translateY(0px) rotate(0deg); }
+        }
+        .animate-float {
+            animation: float 5s infinite ease-in-out alternate;
+        }
+        
+        @keyframes move-cloud {
+            0% { transform: translateX(0); }
+            100% { transform: translateX(50px); }
+        }
+        .animate-cloud {
+            animation: move-cloud 15s infinite alternate ease-in-out;
+        }
+        
+        /* Custom scrollbar for Admin table */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background-color: #f97316;
+            border-radius: 3px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #ffe6cc;
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center pt-8 md:pt-16 min-h-screen p-4 relative">
+    
+    <!-- KHU VỰC TRANG TRÍ MẶT TRĂNG VÀ ĐÈN LỒNG (Responsive/Z-index cao hơn nền) -->
+    <div class="full-moon hidden md:block"></div>
+    <!-- Đèn lồng được đặt vị trí tuyệt đối, phù hợp cho mọi kích thước -->
+    <div class="lantern" style="top: 20px; left: 10%; transform: scale(1.2);"></div>
+    <div class="lantern hidden md:block" style="top: 150px; left: 5%; transform: scale(0.9); animation-delay: 1s;"></div>
+    <div class="lantern" style="top: 50px; right: 20%; animation-delay: 0.5s;"></div>
+    <div class="lantern hidden md:block" style="top: 20px; right: 5%; transform: scale(1.1); animation-delay: 1.5s;"></div>
+    <div class="lantern hidden lg:block" style="bottom: 50px; left: 15%; transform: scale(0.8); animation-delay: 2s;"></div>
+    <div class="lantern hidden lg:block" style="bottom: 20px; right: 10%; animation-delay: 2.5s;"></div>
+    <div class="lantern" style="top: 10%; left: 30%; transform: scale(1.3); animation-delay: 0.2s;"></div>
+    <div class="lantern" style="top: 10%; right: 30%; transform: scale(0.7); animation-delay: 0.8s;"></div>
+    
+    <!-- Trang Trí 3: Mặt Trăng Lớn (Nằm sau vòng quay) -->
+    <!-- Kích thước được điều chỉnh để không làm lu mờ giao diện chính trên mobile -->
+    <div class="decoration-svg absolute top-1/2 left-1/2 -translate-x-1/2" style="width: 80vw; max-width: 500px; height: 500px; margin-top: -150px; z-index: 0;">
+        <svg viewBox="0 0 100 100" fill="#fef9c3" class="w-full h-full opacity-90 filter drop-shadow-lg">
+            <title>Mặt Trăng Rằm Nền</title>
+            <circle cx="50" cy="50" r="45"/>
+            <circle cx="35" cy="40" r="6" fill="#fcd34d" opacity="0.3"/>
+            <circle cx="65" cy="65" r="8" fill="#fcd34d" opacity="0.4"/>
+            <circle cx="55" cy="30" r="4" fill="#fcd34d" opacity="0.3"/>
+        </svg>
+    </div>
+    
+    <!-- Trang Trí (Mây, Thỏ, Lồng Đèn) - Giữ nguyên và thêm hidden mobile cho bớt rối -->
+    <div class="decoration-svg top-16 left-1/4 w-32 h-10 animate-cloud hidden md:block" style="color: #ffffff; opacity: 0.6; animation-delay: 2s;">
+        <svg viewBox="0 0 400 100" fill="currentColor"><title>Đám Mây</title><path d="M 20 60 Q 70 20, 120 60 Q 170 30, 220 60 Q 270 20, 320 60 L 320 100 L 20 100 Z"/></svg>
+    </div>
+    <div class="decoration-svg top-24 right-1/4 w-40 h-12 animate-cloud hidden md:block" style="color: #ffffff; opacity: 0.4; animation-delay: 0s; transform: scaleX(-1);">
+        <svg viewBox="0 0 400 100" fill="currentColor"><title>Đám Mây</title><path d="M 20 60 Q 70 20, 120 60 Q 170 30, 220 60 Q 270 20, 320 60 L 320 100 L 20 100 Z"/></svg>
+    </div>
+
+    <div class="decoration-svg top-8 left-4 w-20 h-20 animate-float hidden md:block" style="--tw-translate-y: -10px; color: #fcd34d;">
+        <svg viewBox="0 0 512 512" fill="currentColor"><title>Thỏ Ngọc</title><path d="M239.1 36.9c-24.6-24.6-64.4-24.6-89 0l-7.1 7.1c-4.7 4.7-6.9 11.2-6.5 17.7l1.7 27.6L222.1 138l1.7 27.6c.4 6.5-1.8 13-6.5 17.7l-7.1 7.1c-24.6 24.6-24.6 64.4 0-89L343 378.1c24.6 24.6 64.4 24.6 89 0l7.1-7.1c4.7-4.7 6.9-11.2 6.5-17.7l-1.7-27.6L290.1 170l-1.7-27.6c-.4-6.5 1.8-13 6.5-17.7l7.1-7.1c24.6-24.6 24.6-64.4 0-89L239.1 36.9z"/><circle cx="256" cy="350" r="100"/><circle cx="256" cy="230" r="60"/></svg>
+    </div>
+    
+    <div class="decoration-svg top-8 right-4 w-16 h-16 animate-float" style="animation-delay: 1s; color: #f97316;">
+        <svg viewBox="0 0 100 100" fill="currentColor"><title>Lồng Đèn Cá Chép</title><path d="M10 50 Q30 30, 50 35 Q70 30, 90 50 Q70 70, 50 65 Q30 70, 10 50 Z"/><path d="M90 50 L95 45 L95 55 Z" fill="#fde047"/><path d="M50 35 L50 20 Q55 25, 60 20 T50 35 Z" fill="#ef4444"/><path d="M50 65 V75 M45 70 V85 M55 70 V85" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </div>
+
+    <!-- Modal Thông báo (Thay thế alert) -->
+    <div id="messageModal" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 hidden modal-container p-4">
+        <!-- Đã điều chỉnh max-w-sm thành max-w-md để linh hoạt hơn -->
+        <div id="modalContent" class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full mid-autumn-card transform scale-0 opacity-0 transition-all modal-content-animated">
+            <h3 id="modalTitle" class="text-2xl font-black mb-4 text-center text-red-600 text-readable-outline">Thông báo</h3>
+            <p id="modalMessage" class="mb-6 text-center text-gray-700"></p>
+            <button id="closeModalBtn" class="w-full py-3 rounded-xl text-lg mid-autumn-btn font-bold">Quay lại</button>
+        </div>
+    </div>
+    
+    <div class="text-center w-full max-w-lg z-10 relative">
+        <h1 class="text-4xl md:text-5xl font-black mb-4 lion-banner-title">
+            Vòng Quay May Mắn Trung Thu
+        </h1>
+        <p id="userIdDisplay" class="text-sm text-yellow-300 mb-2 text-readable-outline"></p>
+
+        <!-- Trang Đăng Ký (Flow Bắt đầu) -->
+        <div id="registrationPage" class="page mid-autumn-card p-6 rounded-2xl shadow-lg flex flex-col items-center">
+            <h2 class="text-2xl font-bold mb-4 text-red-600 text-readable-outline">Đăng Ký Tham Gia</h2>
+            <p class="mb-6 text-gray-600 text-sm">Vui lòng nhập thông tin để nhận Số May Mắn duy nhất (1-200).</p>
+            
+            <input type="text" id="facebookName" placeholder="Nhập Tên Facebook của bạn" class="w-full p-3 mb-3 border-2 border-red-400 rounded-lg focus:ring-red-500 focus:border-red-500 font-medium" required>
+            <input type="tel" id="phoneNumber" placeholder="Nhập Số điện thoại (Dùng để kiểm tra duy nhất)" class="w-full p-3 mb-4 border-2 border-red-400 rounded-lg focus:ring-red-500 focus:border-red-500 font-medium" required>
+
+            <button id="spinBtn" class="w-2/3 max-w-xs py-3 rounded-xl text-lg mid-autumn-btn font-bold hover:shadow-lg transition duration-300">
+                Đăng Ký & Quay Số!
+            </button>
+            
+            <p class="text-xs mt-3 text-red-500 italic text-readable-outline">Mỗi Số điện thoại chỉ được quay 1 lần.</p>
+        </div>
+
+        <!-- Trang Quay Số (Nút QUAY mới) -->
+        <div id="spinPage" class="page mid-autumn-card p-6 rounded-2xl shadow-lg flex flex-col items-center hidden">
+            
+            <div class="relative w-full mb-2">
+                <svg viewBox="0 0 100 30" class="w-full h-10 text-yellow-500 animate-float" style="filter: drop-shadow(0 0 5px #f97316);">
+                    <title>Banner Chúc Mừng Lân Sư Rồng</title>
+                    <rect x="5" y="5" width="90" height="20" rx="10" fill="#ef4444" stroke="#fcd34d" stroke-width="2"/>
+                    <circle cx="20" cy="15" r="3" fill="#ffffff"/>
+                    <circle cx="80" cy="15" r="3" fill="#ffffff"/>
+                    <path d="M10 5 L15 2 Q20 10, 10 25 Z M90 5 L85 2 Q80 10, 90 25 Z" fill="#fcd34d"/>
+                    <path d="M50 5 V0 M45 5 V0 M55 5 V0" stroke="#fcd34d" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                <p class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-lg font-black text-white text-readable-outline" style="text-shadow: 1px 1px 2px #000;">NHẬN SỐ MAY MẮN!</p>
+            </div>
+            
+            <!-- Vòng Quay Nửa Trên (Kích thước sẽ thay đổi theo media query trong CSS) -->
+            <div id="wheel-container" class="mb-4 relative">
+                <!-- Wrapper chỉ hiển thị nửa trên -->
+                <div id="wheel-wrapper">
+                    <!-- Bánh xe quay -->
+                    <div id="wheel" class="animate-pulse-spin">
+                        <!-- Các mốc số (10, 20, 30, ...) được chèn bằng JS -->
+                    </div>
+                    <!-- Con trỏ/Mũi tên đèn lồng -->
+                    <div class="lantern-pointer animate-lantern-glow">
+                        <svg viewBox="0 0 100 100" fill="currentColor">
+                            <path d="M50 10 L80 90 L50 70 L20 90 Z" />
+                        </svg>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Khung Kết Quả (Ban đầu ẩn, chỉ hiện khi đang quay hoặc đã quay xong) -->
+            <div id="resultContainer" class="mid-autumn-card p-4 rounded-xl border-red-600 border-2 w-full max-w-xs mb-4 text-center hidden">
+                <p id="resultDisplay" class="text-xl font-black text-red-700 h-8 text-readable-outline">...</p>
+            </div>
+
+            <!-- NÚT QUAY MỚI (CHỜ NGƯỜI DÙNG BẤM) -->
+            <button id="actualSpinBtn" class="w-2/3 max-w-xs py-3 rounded-xl text-lg mid-autumn-btn font-bold hover:shadow-lg transition duration-300 animate-pulse mb-3">
+                QUAY VÒNG MAY MẮN!
+            </button>
+            
+            <button id="backToRegBtn" class="py-2 px-6 rounded-xl bg-gray-400 text-gray-800 font-bold hover:bg-gray-500">
+                Quay lại Đăng ký
+            </button>
+        </div>
+
+        <!-- Trang Đăng Nhập Admin -->
+        <div id="adminLoginPage" class="page mid-autumn-card p-6 rounded-2xl shadow-lg hidden">
+            <h2 class="text-2xl font-bold mb-4 text-red-600 text-readable-outline">Đăng Nhập Quản Trị</h2>
+            <input type="password" id="adminPassword" placeholder="Nhập mật khẩu bí mật" class="w-full p-3 mb-3 border-2 border-red-400 rounded-lg focus:ring-red-500 focus:border-red-500 font-medium" required>
+            <p id="adminLoginError" class="text-red-500 mb-3 h-5 text-sm text-readable-outline"></p>
+            <button id="adminLoginBtn" class="w-full py-3 rounded-xl mid-autumn-btn font-bold mb-3">
+                Đăng Nhập
+            </button>
+            <button id="backFromAdminBtn" class="w-full py-2 rounded-xl bg-gray-400 text-gray-800 font-bold hover:bg-gray-500">
+                Quay lại
+            </button>
+        </div>
+
+        <!-- Trang Quản Trị (Admin Dashboard) -->
+        <div id="adminDashboard" class="page mid-autumn-card p-6 rounded-2xl shadow-lg hidden text-left">
+            <h2 class="text-2xl font-bold mb-4 text-red-600 text-center text-readable-outline">Bảng Điều Khiển Admin</h2>
+            <!-- Sử dụng responsive grid -->
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm text-center mb-4">
+                <div class="p-2 bg-red-50 rounded-lg text-readable-outline">Tổng số: <span id="totalNumbers" class="text-blue-600 font-black">0</span></div>
+                <div class="p-2 bg-red-50 rounded-lg text-readable-outline">Đã cấp phát: <span id="numbersAllocated" class="text-red-600 font-black">0</span></div>
+                <div class="p-2 bg-red-50 rounded-lg text-readable-outline">Còn lại: <span id="numbersRemaining" class="text-green-600 font-black">0</span></div>
+            </div>
+            
+            <hr class="my-4 border-red-300">
+            
+            <h3 class="text-xl font-bold mb-3 text-center text-red-600 text-readable-outline">Lịch Sử Quay Số Chi Tiết</h3>
+            <!-- Tăng max-h cho khả năng cuộn tốt hơn trên PC -->
+            <div class="overflow-y-auto max-h-96 custom-scrollbar mb-4"> 
+                <table class="min-w-full table-auto border-collapse text-sm">
+                    <thead>
+                        <tr class="bg-red-200 text-red-800 sticky top-0">
+                            <th class="p-2 text-left w-2/5">Tên Facebook</th>
+                            <th class="p-2 text-left w-2/5">Số điện thoại</th>
+                            <th class="p-2 text-center w-1/5">Số May Mắn</th>
+                            <th class="p-2 text-right w-2/5">Thời Gian</th>
+                        </tr>
+                    </thead>
+                    <tbody id="adminSpinHistoryList">
+                        <tr><td colspan="4" class="p-3 text-center text-gray-500">Đang tải dữ liệu...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <button id="resetGameBtn" class="w-full py-3 rounded-xl bg-red-600 text-white font-bold hover:bg-red-700 transition duration-150 text-sm mb-3">
+                ⚠️ Thiết Lập Lại Game (Reset)
+            </button>
+            
+            <button id="adminLogoutBtn" class="w-full py-2 rounded-xl bg-gray-400 text-gray-800 font-bold hover:bg-gray-500 text-sm">
+                Đăng Xuất
+            </button>
+        </div>
+    </div>
+    
+    <!-- FOOTER VÀ LIÊN KẾT ADMIN ẨN -->
+    <footer class="mt-8 text-center text-xs text-white opacity-70">
+        <p class="text-readable-outline">&copy; 2024 Vòng Quay Trung Thu.</p>
+        <p class="mt-1">
+            <a href="#" id="hiddenAdminLink" class="text-gray-400 hover:text-white transition duration-150 text-xs text-readable-outline">
+                🔑 Admin
+            </a>
+        </p>
+    </footer>
+    
+</body>
+</html>
